@@ -1,0 +1,261 @@
+ class YCL_TRANSIT_HELPER definition
+  public
+  final
+  create public .
+
+public section.
+
+  class-methods GET_TRANSIT
+    importing
+      !IV_LOC_FR type /SCMTMS/LOCATION_UUID
+      !IV_LOC_TO type /SCMTMS/LOCATION_UUID
+    exporting
+      !EV_DURATION type /SCMB/DE_DURATION .
+protected section.
+
+    TYPES:
+      BEGIN OF gty_carrier,
+        service_code   TYPE string,
+        service_method TYPE string,
+        service_type   TYPE string,
+        scac           TYPE string,
+      END OF gty_carrier,
+
+      gtt_carriers TYPE STANDARD TABLE OF gty_carrier WITH EMPTY KEY,
+
+      BEGIN OF gty_location,
+        address1       TYPE string,
+        address2       TYPE string,
+        city           TYPE string,
+        country_code   TYPE string,
+        postal_code    TYPE string,
+        state_province TYPE string,
+      END OF gty_location,
+
+      BEGIN OF gty_transit_request,
+        carriers    TYPE gtt_carriers,
+        origin      TYPE gty_location,
+        destination TYPE gty_location,
+        pickup_date TYPE string,
+        shipment_id TYPE string,
+      END OF gty_transit_request.
+
+    TYPES:
+      BEGIN OF gty_message_status,
+        status     TYPE string,
+        code       TYPE string,
+        message    TYPE string,
+        resolution TYPE string,
+      END OF gty_message_status,
+
+      BEGIN OF gty_carrier_service_detail,
+        carrier_name   TYPE string,
+        service_code   TYPE string,
+        service_method TYPE string,
+        service_type   TYPE string,
+        scac           TYPE string,
+      END OF gty_carrier_service_detail,
+
+      BEGIN OF gty_transit_calendar,
+        calendar_days           TYPE i,
+        estimated_delivery_date TYPE string,
+        pickup_date             TYPE string,
+      END OF gty_transit_calendar,
+
+      BEGIN OF gty_service_detail,
+        destination TYPE string,
+        origin      TYPE string,
+        service     TYPE string,
+      END OF gty_service_detail,
+
+      BEGIN OF gty_terminal_codes,
+        destination TYPE string,
+        origin      TYPE string,
+      END OF gty_terminal_codes,
+
+      BEGIN OF gty_carrier_result,
+        carrier_service_detail TYPE gty_carrier_service_detail,
+        transit_days           TYPE i,
+        transit_calendar       TYPE gty_transit_calendar,
+        service_detail         TYPE gty_service_detail,
+        terminal_codes         TYPE gty_terminal_codes,
+        message_status         TYPE gty_message_status,
+      END OF gty_carrier_result,
+
+      gtt_carrier_results TYPE STANDARD TABLE OF gty_carrier_result
+                           WITH EMPTY KEY,
+
+      BEGIN OF gty_transit_response,
+        carriers       TYPE gtt_carrier_results,
+        message_status TYPE gty_message_status,
+      END OF gty_transit_response.
+private section.
+ENDCLASS.
+
+
+
+CLASS YCL_TRANSIT_HELPER IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Static Public Method YCL_TRANSIT_HELPER=>GET_TRANSIT
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_LOC_FR                      TYPE        /SCMTMS/LOCATION_UUID
+* | [--->] IV_LOC_TO                      TYPE        /SCMTMS/LOCATION_UUID
+* | [<---] EV_DURATION                    TYPE        /SCMB/DE_DURATION
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_transit.
+
+    DATA: ls_request   TYPE gty_transit_request,
+          lv_json_req  TYPE string,
+
+          ls_response  TYPE gty_transit_response,
+          lv_json_resp TYPE string.
+
+*********************************************************************
+    DATA: lt_loc_guids TYPE /scmtms/cl_loc_helper=>ty_t_locuuid_range,
+          ls_loc_guid  LIKE LINE OF lt_loc_guids,
+          lt_locations TYPE /scmtms/cl_loc_helper=>ty_t_loc,
+          ls_locations TYPE /scmtms/cl_loc_helper=>ty_s_loc.
+
+    ls_loc_guid-sign    = 'I'.
+    ls_loc_guid-option  = 'EQ'.
+    ls_loc_guid-low     = iv_loc_fr.
+    APPEND ls_loc_guid TO lt_loc_guids.
+
+    CLEAR ls_loc_guid-low.
+    ls_loc_guid-low     = iv_loc_to.
+    APPEND ls_loc_guid TO lt_loc_guids.
+
+    CALL METHOD /scmtms/cl_loc_helper=>get_locations_by_guids
+      EXPORTING
+        it_location_guid_range = lt_loc_guids
+      IMPORTING
+        et_locations           = lt_locations.
+**********************************************************************
+
+    DATA(ls_carrier) = VALUE gty_carrier(
+        service_code   = 'PTP_City_Zip'
+        service_method = 'LTL'
+        service_type   = 'STANDARD'
+        scac           = 'DHL' ).
+
+    "ls_request-carriers = VALUE #( ( ls_carrier ) ).
+
+    READ TABLE lt_locations ASSIGNING FIELD-SYMBOL(<lfs_location>) WITH KEY locuuid = iv_loc_fr.
+    IF sy-subrc = 0.
+      ls_request-origin = VALUE #(
+        address1       = ''   "HOUSE_NUMBER
+        address2       = ''   "STREET
+        city           = <lfs_location>-city
+        country_code   = <lfs_location>-country
+        postal_code    = <lfs_location>-code
+        state_province = <lfs_location>-region ).
+    ENDIF.
+
+    READ TABLE lt_locations ASSIGNING <lfs_location> WITH KEY locuuid = iv_loc_to.
+    IF sy-subrc = 0.
+      ls_request-destination = VALUE #(
+          address1       = ''   "HOUSE_NUMBER
+          address2       = ''   "STREET
+          city           = <lfs_location>-city
+          country_code   = <lfs_location>-country
+          postal_code    = <lfs_location>-code
+          state_province = <lfs_location>-region ).
+    ENDIF.
+
+    "ls_request-pickup_date = '2026-10-13'.
+    "ls_request-shipment_id = ''.
+
+    lv_json_req = /ui2/cl_json=>serialize(
+      data        = ls_request
+      compress    = abap_true
+      pretty_name = /ui2/cl_json=>pretty_mode-camel_case ).
+
+*****************
+    CONSTANTS:
+      lc_destination TYPE rfcdest VALUE 'RFC_S4_TO_CPI'.  "'CPI_LOG_I727'. "
+
+    "Create HTTP client using SM59 destination
+    cl_http_client=>create_by_destination(
+      EXPORTING
+        destination = lc_destination
+      IMPORTING
+        client      = DATA(lo_http_client)
+      EXCEPTIONS
+        argument_not_found       = 1
+        destination_not_found    = 2
+        destination_no_authority = 3
+        plugin_not_active        = 4
+        internal_error           = 5
+        OTHERS                   = 6 ).
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+
+    "Set HTTP request content type
+    lo_http_client->request->set_content_type(
+      'application/json' ).
+
+    "Set HTTP Accept header
+    lo_http_client->request->set_header_field(
+      name  = 'Accept'
+      value = 'application/json' ).
+
+    "Set HTTP request method
+    lo_http_client->request->set_method(
+      if_http_request=>co_request_method_post ).
+
+    "Set JSON request body
+    lo_http_client->request->set_cdata(
+      lv_json_req ).
+
+    "Send request to CPI and receive response
+    TRY.
+        lo_http_client->send( ).
+        lo_http_client->receive( ).
+      CATCH cx_root.
+        RETURN.
+    ENDTRY.
+
+    "Read HTTP response body
+    lv_json_resp =
+      lo_http_client->response->get_cdata( ).
+
+    "Read HTTP response status
+    lo_http_client->response->get_status(
+      IMPORTING
+        code   = DATA(lv_ret_code)
+        reason = DATA(lv_reason) ).
+
+    """"Response
+    /ui2/cl_json=>deserialize(
+      EXPORTING
+        json        = lv_json_resp
+        pretty_name = /ui2/cl_json=>pretty_mode-camel_case
+      CHANGING
+        data        = ls_response ).
+
+    IF ls_response-message_status-status = 'PASS'.
+      LOOP AT ls_response-carriers INTO DATA(ls_carrier1).
+*        DATA(lv_scac) = ls_carrier1-carrier_service_detail-scac.
+
+        ev_duration = ls_carrier1-transit_days.
+
+*        DATA(lv_delivery_date) = ls_carrier1-transit_calendar-estimated_delivery_date.
+*        DATA(lv_pickup_date) = ls_carrier1-transit_calendar-pickup_date.
+        " Use these values in your SAP TM mapping
+      ENDLOOP.
+    ELSE.
+      " Handle API-level failure
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.
+
+
+
+
+
+ 
